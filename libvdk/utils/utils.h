@@ -39,6 +39,9 @@ namespace file {
     inline int delete_file(const std::string& file_path) {
         return ::unlink(file_path.c_str());
     }
+    inline int flush_file(int fd) {
+        return ::fsync(fd);
+    }
     
     // 设置文件偏移
     //int seek_file_li(int fd, LARGE_INTEGER offset, int whence);
@@ -46,6 +49,9 @@ namespace file {
 
     int read_file(int fd, void* buf, size_t size);
     int write_file(int fd, const void* buf, size_t size);
+
+    int seek_and_read_file(int fd, off64_t offset, void* buf, size_t size, int whence);
+    int seek_and_write_file(int fd, off64_t offset, const void* buf, size_t size, int whence);
 
     //int get_file_sizes_li(int fd, LARGE_INTEGER* pos);
     int get_file_sizes(int fd, int64_t* pos);
@@ -257,9 +263,9 @@ namespace encrypt {
     uint32_t crc32(const char* data, size_t len);
     
     // from leveldb/crc32c
-    uint32_t Extend(uint32_t crc, const char* data, size_t len);
+    uint32_t extend_crc32c(uint32_t crc, const char* data, size_t len);
     inline uint32_t crc32c(const char* data, size_t len) {
-        return Extend(0, data, len);
+        return extend_crc32c(0, data, len);
     }
 
     uint32_t checksum(const uint8_t* data, size_t len);

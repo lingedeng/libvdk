@@ -35,7 +35,7 @@ const uint8_t kMetadataRegionGuid[16] = {
 };
 
 HeaderSection::HeaderSection() 
-    : current_header_index_(-1), 
+    : active_header_index_(-1), 
       bat_entry_(nullptr),
       metadata_entry_(nullptr) {
     memset(&file_identifier_, 0, sizeof(file_identifier_));
@@ -77,20 +77,20 @@ HeaderSection::~HeaderSection () {
  * The VHDX spec calls for header updates to be performed twice, so that both
  * the current and non-current header have valid info
  */
-int HeaderSection::updateHeader(int fd, const libvdk::guid::GUID* file_rw_guid/* = nullptr*/) {
+int HeaderSection::updateHeader(int fd, const libvdk::guid::GUID* file_rw_guid/* = nullptr*/, const libvdk::guid::GUID* log_guid/* = nullptr*/) {
     int ret = 0;
-    assert(file_rw_guid != nullptr && 
-        memcmp(file_rw_guid, &libvdk::guid::kNullGuid, sizeof(libvdk::guid::GUID)) != 0);
+    // assert(file_rw_guid != nullptr && 
+    //     memcmp(file_rw_guid, &libvdk::guid::kNullGuid, sizeof(libvdk::guid::GUID)) != 0);
 
-    ret = updateInactiveHeader(fd, file_rw_guid);
+    ret = updateInactiveHeader(fd, file_rw_guid, log_guid);
     if (ret) {
         return ret;
     }
 
-    return updateInactiveHeader(fd, file_rw_guid);
+    return updateInactiveHeader(fd, file_rw_guid, log_guid);
 }
 
-int HeaderSection::updateInactiveHeader(int fd, const libvdk::guid::GUID* file_rw_guid) {
+int HeaderSection::updateInactiveHeader(int fd, const libvdk::guid::GUID* file_rw_guid, const libvdk::guid::GUID* log_guid) {
     int ret = 0;
     int hdr_index = 0;
     uint64_t header_offset = vhdx::header::kHeader1InitOffset;
@@ -98,19 +98,24 @@ int HeaderSection::updateInactiveHeader(int fd, const libvdk::guid::GUID* file_r
     Header* active;
     Header* inactive;
 
-    if (current_header_index_ == 0) {
+    if (active_header_index_ == 0) {
         hdr_index = 1;
         header_offset = vhdx::header::kHeader2InitOffset;
     }
 
-    active = &headers_[current_header_index_];
+    active = &headers_[active_header_index_];
     inactive = &headers_[hdr_index];
 
     inactive->seq_num = active->seq_num + 1;
 
     /* a new file guid must be generated before any file write, including
      * headers */
-    inactive->file_write_guid = *file_rw_guid;
+    if (file_rw_guid) {
+        inactive->file_write_guid = *file_rw_guid;
+    }
+    if (log_guid) {
+        inactive->log_guid = *log_guid;
+    }
 
     libvdk::guid::generate(&inactive->data_write_guid);    
 
@@ -121,7 +126,7 @@ int HeaderSection::updateInactiveHeader(int fd, const libvdk::guid::GUID* file_r
     }
     // TODO: add file flush, make sure write to file    
 
-    current_header_index_ = hdr_index;
+    active_header_index_ = hdr_index;
 exit:
     return ret;
 }
@@ -313,7 +318,7 @@ int HeaderSection::parseHeader(int fd) {
         memcpy(&headers_[i], h, sizeof(headers_[0]));
 
         if (h->seq_num > max_seq_num) {
-            current_header_index_ = i;
+            active_header_index_ = i;
             max_seq_num = h->seq_num;
         }
 

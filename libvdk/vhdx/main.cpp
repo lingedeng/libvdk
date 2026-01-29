@@ -10,12 +10,13 @@
 
 void usage(const char* argv0) {
     printf("usage: %s /path/to/vhdx_file\n", argv0);
-    printf("usage: %s -c [2|3] -s x[M|G|T] /path/to/vhdx_file\n", argv0);
+    printf("usage: %s -c (2|3) -s x(M|G|T) /path/to/vhdx_file\n", argv0);
     printf("usage: %s -c 4 -p /path/to/parent_vhdx_file /path/to/vhdx_file\n", argv0);
     //printf("usage: %s -c 4 -p /path/to/parent_vhdx_file -a 'parent_absolute_path' -e 'parent_relative_path' /path/to/vhdx_file\n", argv0);
-    printf("usage: %s -m -a 'parent_absolute_path' -e 'parent_relative_path' /path/to/vhdx_file\n", argv0);
+    printf("usage: %s -m [-a 'parent_absolute_path'] [-e 'parent_relative_path'] /path/to/vhdx_file\n", argv0);
     printf("usage: %s -r sector_num[:sectors(default:1)] /path/to/vhdx_file\n", argv0);    
     printf("usage: %s -b sector_num /path/to/vhdx_file (read bat table per one chunk)\n", argv0);
+    printf("usage: %s -l /path/to/vhdx_file (show log)\n", argv0);
 }
 
 int main(int argc, char* argv[]) {
@@ -25,13 +26,14 @@ int main(int argc, char* argv[]) {
     std::string parent_absolute_path, parent_relative_path;
     std::string disk_size;
     bool read_sectors = false;
-    bool read_bat = false;    
+    bool read_bat = false;
+    bool show_log = false;    
     uint64_t sector_num = 0UL;
     uint32_t nb_sectors = 1;    
     int c;
     char unit;
 
-    while ((c = getopt(argc, argv, "c:p:s:hma:e:r:b:")) != -1) {
+    while ((c = getopt(argc, argv, "c:p:s:hma:e:r:b:l")) != -1) {
         switch (c) {
         case 'c':
             disk_type = atoi(optarg);
@@ -76,6 +78,9 @@ int main(int argc, char* argv[]) {
         case 'b':
             sector_num = libvdk::convert::atoui64(optarg);
             read_bat = true;
+            break;
+        case 'l':
+            show_log = true;
             break;
         case 'h':
             usage(argv[0]);
@@ -277,7 +282,10 @@ int main(int argc, char* argv[]) {
         // const vhdx::bat::BatEntry* bat_array = vhdx.bat();
         // for (uint32_t i=0; i<bat_count; ++i) {
         //     printf("%02d: 0x%016lx\n", i, bat_array[i]);
-        // }        
+        // } 
+        if (show_log) {
+            vhdx.showLogEntries();       
+        }
     }       
 
     return 0;   

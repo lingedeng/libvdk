@@ -251,7 +251,7 @@ constexpr inline const uint8_t* RoundUp(const uint8_t* pointer) {
       ~static_cast<uintptr_t>(N - 1));
 }
 
-uint32_t Extend(uint32_t crc, const char* data, size_t n) {
+uint32_t extend_crc32c(uint32_t crc, const char* data, size_t n) {
 //   static bool accelerate = CanAccelerateCRC32C();
 //   if (accelerate) {
 //     return AcceleratedCRC32C(crc, data, n);

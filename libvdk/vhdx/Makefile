@@ -6,7 +6,7 @@ CC_TARGET_D = vhdxd
 CC_TARGET_DEST = bin/
 CC_LIB_TARGET = libvdk.a
 
-CC_DEFINE = #-DRW_DEBUG
+CC_DEFINE = -DRW_DEBUG1
 CC_FLAGS = -g -Wall -fmessage-length=0 -fshort-wchar -std=c11
 CPP_FLAGS = -g -Wall -fmessage-length=0 -fshort-wchar -std=c++11
 CC_INCLUDES = -I../utils

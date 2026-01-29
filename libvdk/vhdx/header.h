@@ -22,7 +22,9 @@ struct Header {     // length = 64KB
     uint64_t    seq_num;
     libvdk::guid::GUID      file_write_guid;
     libvdk::guid::GUID      data_write_guid;
-    libvdk::guid::GUID      log_guid;
+    libvdk::guid::GUID      log_guid;   // Specifies a 128-bit unique identifier used to determine the validity of log entries
+                                        // If this field is zero, then the log is empty or has no valid entries and MUST not be replayed
+                                        // Otherwise, only log entries that contain this identifier in their header are valid log entries
     uint16_t    log_version;    
     uint16_t    version;        // must be 1
     uint32_t    log_length;     // Specifies the size, in bytes of the log. This value MUST be a multiple of 1MB
@@ -70,7 +72,7 @@ public:
     int  parseContent(int fd);    
 
     const libvdk::guid::GUID& activeHeaderDataWriteGuid() const {
-        return headers_[current_header_index_].data_write_guid;
+        return headers_[active_header_index_].data_write_guid;
     }
     Header& header(int current_idx) {
         return headers_[current_idx];
@@ -89,10 +91,26 @@ public:
     }
 
     int getCurrentHeaderIndex() {
-        return current_header_index_;
+        return active_header_index_;
     }
 
-    int updateHeader(int fd, const libvdk::guid::GUID* file_rw_guid = nullptr);
+    uint32_t logLength() const {
+        return headers_[active_header_index_].log_length;
+    }
+
+    uint64_t logOffset() const {
+        return headers_[active_header_index_].log_offset;
+    }
+
+    const libvdk::guid::GUID& logGuid() const {
+        return headers_[active_header_index_].log_guid;
+    }
+
+    uint32_t logVersion() const {
+        return headers_[active_header_index_].log_version;
+    }
+
+    int updateHeader(int fd, const libvdk::guid::GUID* file_rw_guid = nullptr, const libvdk::guid::GUID* log_guid = nullptr);
     int updateRegionTable(int current_idx);
 
     void show() const;    
@@ -116,7 +134,7 @@ private:
     void showHeader() const;
     void showRegion() const;
 
-    int  updateInactiveHeader(int fd, const libvdk::guid::GUID* file_rw_guid);
+    int  updateInactiveHeader(int fd, const libvdk::guid::GUID* file_rw_guid, const libvdk::guid::GUID* log_guid);
     int  writeHeader(int fd, uint64_t offset, Header* h);
     int  writeRegionTable(int fd, uint64_t offset, RegionTable* rt);
     uint32_t calcHeaderCrc(const Header* header);
@@ -126,7 +144,7 @@ private:
     Header headers_[2];
     RegionTable region_tables_[2];
 
-    int32_t current_header_index_;
+    int32_t active_header_index_;
     RegionTableEntry* bat_entry_;
     RegionTableEntry* metadata_entry_;    
 };

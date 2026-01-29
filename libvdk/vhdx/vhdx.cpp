@@ -24,6 +24,8 @@ struct SectorInfo {
     uint64_t bitmap_offset; /* bitmap offset for differencing, in bytes */
 };
 
+#define WRITE_LOG
+
 } // namespace detail
 
 int Vhdx::createVdkFile(const std::string& file, const std::string& parent_file, uint64_t size_in_bytes, 
@@ -251,15 +253,21 @@ int Vhdx::parse() {
         CONSLOG("parse file: %s header section failed", file_.c_str());
         ret = -1;
     } else {
-        //hs.show();
+        log_section_.setVhdx(this);
+        ret = log_section_.parseContent();
+        if (ret) {
+            CONSLOG("replay log failed");            
+        } else {
+            //hs.show();
 
-        // printf("current header index: %d, bat offset: %" PRIu64 ", meta offset: %" PRIu64 "\n", 
-        //     hs.getCurrentHeaderIndex(), hs.batEntry().file_offset, hs.metadataEntry().file_offset);
+            // printf("current header index: %d, bat offset: %" PRIu64 ", meta offset: %" PRIu64 "\n", 
+            //     hs.getCurrentHeaderIndex(), hs.batEntry().file_offset, hs.metadataEntry().file_offset);
 
-        if (mtd_section_.parseContent(fd_, hdr_section_.metadataEntry().file_offset)) {
-            CONSLOG("parse file: %s metadata section failed", file_.c_str());
-            ret = -1;
-        } 
+            if (mtd_section_.parseContent(fd_, hdr_section_.metadataEntry().file_offset)) {
+                CONSLOG("parse file: %s metadata section failed", file_.c_str());
+                ret = -1;
+            } 
+        }
     }
 
     if (ret == 0) {
@@ -385,18 +393,9 @@ int Vhdx::readRecursion(int vhdx_index, uint64_t sector_num, uint32_t nb_sectors
         case PayloadBatEntryStatus::kBlockUnmapped:
         case PayloadBatEntryStatus::kBlockZero:
             if (current_vhdx->diskType() == vhdx::metadata::VirtualDiskType::kDifferencing) {
-                uint64_t parent_sector_num = sector_num;
-                uint32_t parent_nb_sectors = nb_sectors;
-                int v_idx = vhdx_index + 1;
-
-#ifdef RW_DEBUG
-                CONSLOG("read recursion, idx:%d, sector_num: %" PRIu64 ", sectors: %u", 
-                    v_idx, parent_sector_num, parent_nb_sectors);
-#endif                    
-                ret = readRecursion(v_idx, parent_sector_num, parent_nb_sectors, buf);
+                ret = readFromParents(vhdx_index+1, sector_num, nb_sectors, buf);
                 if (ret) {
-                    CONSLOG("recursion read sector: %" PRIu64 " , sectors: %u with index: %d failed",
-                            parent_sector_num, parent_nb_sectors, v_idx);
+                    CONSLOG("read from parent failed");
                     goto exit;
                 }
             } else if (current_vhdx->diskType() == vhdx::metadata::VirtualDiskType::kDynamic) {
@@ -406,17 +405,11 @@ int Vhdx::readRecursion(int vhdx_index, uint64_t sector_num, uint32_t nb_sectors
             }
             break;
         case PayloadBatEntryStatus::kBlockFullPresent:
-            ret = libvdk::file::seek_file(current_vhdx->fd(), si.file_offset, SEEK_SET);
+            ret = current_vhdx->readFromCurrent(si.file_offset, buf, si.bytes_avail);
             if (ret) {
-                CONSLOG("seek to %" PRIu64 " failed", si.file_offset);
+                CONSLOG("read from current failed");
                 goto exit;
-            }
-            
-            ret = libvdk::file::read_file(current_vhdx->fd(), buf, si.bytes_avail);
-            if (ret) {
-                CONSLOG("read from offset %" PRIu64 " with length %u failed", si.file_offset, si.bytes_avail);
-                goto exit;
-            }
+            }            
             break;
         case PayloadBatEntryStatus::kBlockPartiallyPresent:
             {
@@ -432,34 +425,26 @@ int Vhdx::readRecursion(int vhdx_index, uint64_t sector_num, uint32_t nb_sectors
                 std::vector<uint8_t> bitmap_buf;
                 uint8_t* p;
                 uint8_t* tmp_buf;
-                uint32_t secs = sector_num % vhdx::bat::kSectorsPerBitmap;
+                uint32_t secs = 0; //sector_num % vhdx::bat::kSectorsPerBitmap;
                 uint32_t avail_sectors = 0, unavail_sectors = 0;                
-                ret = current_vhdx->loadBlockBitmap(bitmap_offset, &bitmap_buf);
+                //ret = current_vhdx->loadBlockBitmap(bitmap_offset, &bitmap_buf);
+                ret = current_vhdx->loadPartiallyBlockBitmap(sector_num, si.sectors_avail, &bitmap_offset, &secs, &bitmap_buf);
                 if (ret) {
                     CONSLOG("load block bitmap failed");
                     goto exit;
                 }
 
                 p = bitmap_buf.data();
-                uint64_t partially_sector_num = sector_num;
+                uint64_t partially_sector_num = sector_num;                
                 tmp_buf = buf;
                 for (uint32_t i=0; i<si.sectors_avail; ++i) {
                     if (testBit(p, secs+i)) {
                         if (unavail_sectors > 0) {
                             uint32_t unavail_bytes = unavail_sectors << current_vhdx->logicalSectorSizeBits();
-                            // read from parent
-                            uint64_t parent_sector_num = partially_sector_num;
-                            uint32_t parent_nb_sectors = unavail_sectors;
-                            int v_idx = vhdx_index + 1;
 
-#ifdef RW_DEBUG
-                            CONSLOG("read recursion, idx:%d, sector_num: %" PRIu64 ", sectors: %u", 
-                                v_idx, parent_sector_num, parent_nb_sectors);
-#endif                                
-                            ret = readRecursion(v_idx, parent_sector_num, parent_nb_sectors, tmp_buf);
+                            ret = readFromParents(vhdx_index+1, partially_sector_num, unavail_sectors, tmp_buf);
                             if (ret) {
-                                CONSLOG("recursion read sector: %" PRIu64 " , sectors: %u with parents index: %d failed",
-                                        parent_sector_num, parent_nb_sectors, v_idx);
+                                CONSLOG("read from parent failed");
                                 goto exit;
                             }
 
@@ -479,19 +464,12 @@ int Vhdx::readRecursion(int vhdx_index, uint64_t sector_num, uint32_t nb_sectors
 #ifdef RW_DEBUG
                             CONSLOG("read in diff, idx:%d, sector_num: %" PRIu64 ", sectors: %u", 
                                 vhdx_index, partially_sector_num, avail_sectors);
-#endif                                
-
-                            ret = libvdk::file::seek_file(current_vhdx->fd(), avail_offset, SEEK_SET);
+#endif                         
+                            ret = current_vhdx->readFromCurrent(avail_offset, tmp_buf, avail_bytes);
                             if (ret) {
-                                CONSLOG("seek to %" PRIu64 " failed", avail_offset);
+                                CONSLOG("read from current failed");
                                 goto exit;
-                            }
-                            
-                            ret = libvdk::file::read_file(current_vhdx->fd(), tmp_buf, avail_bytes);
-                            if (ret) {
-                                CONSLOG("read from offset %" PRIu64 " with length %u failed", si.file_offset, avail_bytes);
-                                goto exit;
-                            }
+                            }                            
 
                             partially_sector_num += avail_sectors;
                             tmp_buf += avail_bytes;
@@ -513,17 +491,11 @@ int Vhdx::readRecursion(int vhdx_index, uint64_t sector_num, uint32_t nb_sectors
                         vhdx_index, partially_sector_num, avail_sectors);
 #endif                        
 
-                    ret = libvdk::file::seek_file(current_vhdx->fd(), avail_offset, SEEK_SET);
+                    ret = current_vhdx->readFromCurrent(avail_offset, tmp_buf, avail_bytes);
                     if (ret) {
-                        CONSLOG("seek to %" PRIu64 " failed", avail_offset);
+                        CONSLOG("read from current failed");
                         goto exit;
-                    }
-                    
-                    ret = libvdk::file::read_file(current_vhdx->fd(), tmp_buf, avail_bytes);
-                    if (ret) {
-                        CONSLOG("read from offset %" PRIu64 " with length %u failed", si.file_offset, avail_bytes);
-                        goto exit;
-                    }
+                    }                    
 
                     partially_sector_num += avail_sectors;
                     tmp_buf += avail_bytes;
@@ -531,19 +503,10 @@ int Vhdx::readRecursion(int vhdx_index, uint64_t sector_num, uint32_t nb_sectors
                     avail_sectors = 0; 
                 } else if (unavail_sectors > 0) {
                     uint32_t unavail_bytes = unavail_sectors << current_vhdx->logicalSectorSizeBits();
-                    // read from parent
-                    uint64_t parent_sector_num = partially_sector_num;
-                    uint32_t parent_nb_sectors = unavail_sectors;
-                    int v_idx = vhdx_index + 1;
 
-#ifdef RW_DEBUG
-                    CONSLOG("read recursion, idx:%d, sector_num: %" PRIu64 ", sectors: %u", 
-                        v_idx, parent_sector_num, parent_nb_sectors);
-#endif                        
-                    ret = readRecursion(v_idx, parent_sector_num, parent_nb_sectors, tmp_buf);
+                    ret = readFromParents(vhdx_index+1, partially_sector_num, unavail_sectors, tmp_buf);
                     if (ret) {
-                        CONSLOG("recursion read sector: %" PRIu64 " , sectors: %u with parents index: %d failed",
-                                parent_sector_num, parent_nb_sectors, v_idx);
+                        CONSLOG("read from parent failed");
                         goto exit;
                     }
 
@@ -573,15 +536,51 @@ exit:
     return ret;
 }
 
+int Vhdx::readFromParents(int parents_index, uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf) {
+    // uint64_t parent_sector_num = partially_sector_num;
+    // uint32_t parent_nb_sectors = unavail_sectors;
+    // int v_idx = vhdx_index + 1;
+
+#ifdef RW_DEBUG
+    CONSLOG("read recursion, idx:%d, sector_num: %" PRIu64 ", sectors: %u", 
+        parents_index, sector_num, nb_sectors);
+#endif
+
+    int ret = readRecursion(parents_index, sector_num, nb_sectors, buf);
+    if (ret) {
+        CONSLOG("recursion read sector: %" PRIu64 " , sectors: %u with parents index: %d failed",
+                sector_num, nb_sectors, parents_index);        
+    }
+
+    return ret;
+}
+
+int Vhdx::readFromCurrent(uint64_t offset, uint8_t* buf, uint32_t len) {
+    int ret = libvdk::file::seek_file(fd_, offset, SEEK_SET);
+    if (ret) {
+        CONSLOG("seek to %" PRIu64 " failed", offset);
+        return ret;
+    }
+    
+    ret = libvdk::file::read_file(fd_, buf, len);
+    if (ret) {
+        CONSLOG("read from offset %" PRIu64 " with length %u failed", offset, len);        
+    }
+
+    return ret;
+}
+
 int Vhdx::write(uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf) {
     using vhdx::bat::PayloadBatEntryStatus;
 
     int ret = -ENOTSUP;
     detail::SectorInfo si;
-    vhdx::bat::BatEntry bat_entry;
-    uint64_t bat_entry_offset;
+    vhdx::bat::BatEntry bat_entry, bitmap_bat_entry;
+    uint64_t bat_entry_offset, bitmap_bat_entry_offset;
     PayloadBatEntryStatus status;     
-    bool bat_update = false;    
+    bool bat_update = false, bitmap_bat_update = false, bitmap_update = false; 
+    uint64_t bat_prior_offset = 0;
+    std::vector<uint8_t> partially_bitmap_buf;   
 
     ret = userVisibleWrite();
     if (ret) {
@@ -596,10 +595,12 @@ int Vhdx::write(uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf) {
     }
 
     while (nb_sectors > 0) {
-        bool use_zero_buffers = false;
-        bat_update = false;
+        bool use_zero_buffers = false;        
         bool parent_already_alloc_block = false; 
-        uint64_t block_partially_present_offset = 0UL;
+        uint64_t block_partially_present_offset = 0;
+        uint64_t partially_bitmap_offset = 0;
+
+        bat_update = bitmap_bat_update = bitmap_update = false;
         
         blockTranslate(sector_num, nb_sectors, &si);
         vhdx::bat::payloadBatStatusOffset(bat_entries_[si.bat_idx], &status, &block_partially_present_offset);
@@ -614,6 +615,8 @@ int Vhdx::write(uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf) {
         case PayloadBatEntryStatus::kBlockNotPresent:
         case PayloadBatEntryStatus::kBlockUndefined:
         case PayloadBatEntryStatus::kBlockUnmapped:
+            bat_prior_offset = si.file_offset;
+
             if (diskType() == vhdx::metadata::VirtualDiskType::kDifferencing) {
                 parent_already_alloc_block = isParentAlreadyAllocBlock(si.bat_idx);
 
@@ -634,7 +637,8 @@ int Vhdx::write(uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf) {
              */
             if (parent_already_alloc_block) {
                 updateBatTablePayloadEntry(si, vhdx::bat::PayloadBatEntryStatus::kBlockPartiallyPresent, &bat_entry, &bat_entry_offset);
-                updateBatTableBitmapEntry(si, vhdx::bat::BitmapBatEntryStatus::kBlockPresent);
+                updateBatTableBitmapEntry(si, vhdx::bat::BitmapBatEntryStatus::kBlockPresent, &bitmap_bat_entry, &bitmap_bat_entry_offset);
+                bitmap_bat_update = true;
             } else {
                 updateBatTablePayloadEntry(si, vhdx::bat::PayloadBatEntryStatus::kBlockFullPresent, &bat_entry, &bat_entry_offset);
             }            
@@ -653,18 +657,27 @@ int Vhdx::write(uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf) {
 
             FALLTHROUGH_INTENDED;
         case PayloadBatEntryStatus::kBlockFullPresent:
+            /* if the file offset address is in the header zone,
+                * there is a problem */
+            if (si.file_offset < (1 * libvdk::kMiB)) {
+                CONSLOG("write file offset: %" PRIu64 " too small", si.file_offset);
+                ret = -EFAULT;
+                goto error_bat_restore;
+            }
+
             ret = libvdk::file::seek_file(fd_, si.file_offset, SEEK_SET);
             if (ret) {
                 CONSLOG("seek to %" PRIu64 " failed", si.file_offset);
-                goto exit;
+                goto error_bat_restore;
             }
             
             ret = libvdk::file::write_file(fd_, buf, si.bytes_avail);
             if (ret) {
                 CONSLOG("write to offset %" PRIu64 " with length %u failed", si.file_offset, si.bytes_avail);
-                goto exit;
+                goto error_bat_restore;
             }           
 
+#ifndef WRITE_LOG
             ret = writeBatTableEntry(si.bat_idx);
             if (ret) {
                 CONSLOG("write payload bat entry failed");
@@ -684,6 +697,18 @@ int Vhdx::write(uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf) {
                     goto exit;
                 }
             }
+#else
+            if (parent_already_alloc_block) {
+                partially_bitmap_offset = si.bitmap_offset;
+                ret = modifyPartiallyBitmap(&partially_bitmap_offset, sector_num, si.sectors_avail, &partially_bitmap_buf);
+                if (ret) {
+                    CONSLOG("modify partially bitmap failed");
+                    goto exit;
+                }
+
+                bitmap_update = true;
+            }            
+#endif            
             
             break;
         case PayloadBatEntryStatus::kBlockPartiallyPresent:            
@@ -704,13 +729,24 @@ int Vhdx::write(uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf) {
             if (ret) {
                 CONSLOG("write to offset %" PRIu64 " with length %u failed", si.file_offset, si.bytes_avail);
                 goto exit;
-            } 
+            }
 
+#ifndef WRITE_LOG
             ret = writeBitmap(si.bitmap_offset, sector_num, si.sectors_avail);
             if (ret) {
                 CONSLOG("write bitmap failed");
                 goto exit;
-            }           
+            }
+#else
+            partially_bitmap_offset = si.bitmap_offset;
+            ret = modifyPartiallyBitmap(&partially_bitmap_offset, sector_num, si.sectors_avail, &partially_bitmap_buf);
+            if (ret) {
+                CONSLOG("modify partially bitmap failed");
+                goto exit;
+            }
+
+            bitmap_update = true;
+#endif                       
             break;
         default:
             ret = -EIO;
@@ -718,18 +754,46 @@ int Vhdx::write(uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf) {
             break;
         }
 
+#ifdef WRITE_LOG
         if (bat_update) {
             /* this will update the BAT entry into the log journal, and
-                * then flush the log journal out to disk */
-            // TODO: log write and flush
+                * then flush the log journal out to disk */            
+            ret = log_section_.writeLogEntryAndFlush(bat_entry_offset, &bat_entry, sizeof(vhdx::bat::BatEntry));
+            if (ret) {
+                CONSLOG("write payload bat log entry failed");
+                goto exit;
+            }
         }
 
+        if (bitmap_update) {
+            ret = log_section_.writeLogEntryAndFlush(partially_bitmap_offset, partially_bitmap_buf.data(), partially_bitmap_buf.size());
+            if (ret) {
+                CONSLOG("write partially bitmap log entry failed");
+                goto exit;
+            }
+        }
+
+        if (bitmap_bat_update) {
+            ret = log_section_.writeLogEntryAndFlush(bitmap_bat_entry_offset, &bitmap_bat_entry, sizeof(vhdx::bat::BatEntry));
+            if (ret) {
+                CONSLOG("write bitmap bat log entry failed");
+                goto exit;
+            }
+        }
+#endif
         nb_sectors -= si.sectors_avail;
         sector_num += si.sectors_avail;
         buf += si.bytes_avail;             
     }
     ret = 0;
-        
+    goto exit;
+
+error_bat_restore:
+    if (bat_update) {
+        si.file_offset = bat_prior_offset;
+        updateBatTablePayloadEntry(si, status, nullptr, nullptr);
+    }
+
 exit:
     return ret;
 }
@@ -770,13 +834,26 @@ void Vhdx::updateBatTablePayloadEntry(const detail::SectorInfo& si, vhdx::bat::P
 
     bat_entries_[si.bat_idx] = vhdx::bat::makePayloadBatEntry(status, si.file_offset);
 
-    *bat_entry = bat_entries_[si.bat_idx];
-    *bat_entry_offset = hdr_section_.batEntry().file_offset + si.bat_idx * sizeof(vhdx::bat::BatEntry);
+    if (bat_entry) {
+        *bat_entry = bat_entries_[si.bat_idx];
+    }
+    if (bat_entry_offset) {
+        *bat_entry_offset = hdr_section_.batEntry().file_offset + si.bat_idx * sizeof(vhdx::bat::BatEntry);
+    }
 }
 
-void Vhdx::updateBatTableBitmapEntry(const detail::SectorInfo& si, vhdx::bat::BitmapBatEntryStatus status) {
+void Vhdx::updateBatTableBitmapEntry(const detail::SectorInfo& si, vhdx::bat::BitmapBatEntryStatus status,
+    vhdx::bat::BatEntry* bat_entry, uint64_t* bat_entry_offset) {
 
-    bat_entries_[si.bitmap_idx] = vhdx::bat::makeBitmapBatEntry(status, si.bitmap_offset);    
+    bat_entries_[si.bitmap_idx] = vhdx::bat::makeBitmapBatEntry(status, si.bitmap_offset); 
+
+    if (bat_entry) {
+        *bat_entry = bat_entries_[si.bitmap_idx];
+    }
+
+    if (bat_entry_offset) {
+        *bat_entry_offset = hdr_section_.batEntry().file_offset + si.bitmap_idx * sizeof(vhdx::bat::BatEntry);
+    }   
 }
 
 int Vhdx::userVisibleWrite() {
@@ -885,7 +962,40 @@ int Vhdx::loadBlockBitmap(uint64_t bitmap_offset, std::vector<uint8_t>* bitmap_b
     
     ret = libvdk::file::read_file(fd_, bitmap_buf->data(), bitmap_buf->size());
     if (ret) {
-        CONSLOG("read from offset %" PRIu64 " with length %u failed", bitmap_offset, static_cast<uint32_t>(1*libvdk::kMiB));
+        CONSLOG("read from offset %" PRIu64 " with length %lu failed", bitmap_offset, bitmap_buf->size());
+    }
+
+    return ret;
+}
+
+int Vhdx::loadPartiallyBlockBitmap(uint64_t sector_num, uint32_t nb_sectors, 
+        uint64_t *bitmap_offset, uint32_t *secs, std::vector<uint8_t>* bitmap_buf) {
+    int ret = 0;    
+
+    uint32_t secs_index = sector_num % vhdx::bat::kSectorsPerBitmap;
+    uint32_t byte_index = secs_index / 8;
+    assert(byte_index < (1 * libvdk::kMiB));
+    
+    *bitmap_offset += byte_index;    
+    *secs = secs_index % 8;
+
+    uint32_t need_bytes = libvdk::convert::divRoundUp((*secs + nb_sectors), 8);
+    bitmap_buf->resize(need_bytes);
+
+#ifdef RW_DEBUG
+    CONSLOG("sector num: %" PRIu64 ", sectors: %u, load bytes: %u, byte index:[%u:%u], load partially offset: %" PRIu64 "",
+        sector_num, nb_sectors, need_bytes, byte_index, *secs, *bitmap_offset);
+#endif
+
+    ret = libvdk::file::seek_file(fd_, *bitmap_offset, SEEK_SET);
+    if (ret) {
+        CONSLOG("seek to %" PRIu64 " failed", *bitmap_offset); 
+        return ret;       
+    }
+    
+    ret = libvdk::file::read_file(fd_, bitmap_buf->data(), bitmap_buf->size());
+    if (ret) {
+        CONSLOG("read from offset %" PRIu64 " with length %lu failed", *bitmap_offset, bitmap_buf->size());
     }
 
     return ret;
@@ -902,7 +1012,7 @@ int Vhdx::saveBlockBitmap(uint64_t bitmap_offset, const std::vector<uint8_t>& bi
     
     ret = libvdk::file::write_file(fd_, reinterpret_cast<const void *>(bitmap_buf.data()), bitmap_buf.size());
     if (ret) {
-        CONSLOG("write to offset %" PRIu64 " with length %u failed", bitmap_offset, static_cast<uint32_t>(1*libvdk::kMiB));
+        CONSLOG("write to offset %" PRIu64 " with length %lu failed", bitmap_offset, bitmap_buf.size());
     }
 
     return ret;
@@ -912,10 +1022,11 @@ int Vhdx::writeBitmap(uint64_t bitmap_offset, uint64_t sector_num, uint32_t nb_s
     int ret = 0;
     std::vector<uint8_t> bitmap_buf;
     uint8_t *p = nullptr;
-    uint32_t secs = sector_num % vhdx::bat::kSectorsPerBitmap;
-    uint32_t i;
+    uint32_t secs = 0; //sector_num % vhdx::bat::kSectorsPerBitmap;
+    uint32_t i;    
 
-    ret = loadBlockBitmap(bitmap_offset, &bitmap_buf);
+    // ret = loadBlockBitmap(bitmap_offset, &bitmap_buf);
+    ret = loadPartiallyBlockBitmap(sector_num, nb_sectors, &bitmap_offset, &secs, &bitmap_buf);
     if (ret) {
         CONSLOG("load block bitmap failed");
         goto exit;
@@ -931,6 +1042,27 @@ int Vhdx::writeBitmap(uint64_t bitmap_offset, uint64_t sector_num, uint32_t nb_s
         CONSLOG("save block bitmap failed");
         goto exit;
     }
+exit:
+    return ret;
+}
+
+int Vhdx::modifyPartiallyBitmap(uint64_t *bitmap_offset, uint64_t sector_num, uint32_t nb_sectors, std::vector<uint8_t>* partially_bitmap_buf) {
+    int ret = 0;
+    uint8_t *p = nullptr;
+    uint32_t secs = 0; //sector_num % vhdx::bat::kSectorsPerBitmap;
+    uint32_t i;
+
+    ret = loadPartiallyBlockBitmap(sector_num, nb_sectors, bitmap_offset, &secs, partially_bitmap_buf);
+    if (ret) {
+        CONSLOG("load block bitmap failed");
+        goto exit;
+    }
+
+    p = partially_bitmap_buf->data();    
+    for (i = 0; i < nb_sectors; ++i) {
+        setBit(p, secs + i);
+    }
+
 exit:
     return ret;
 }

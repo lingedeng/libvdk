@@ -45,6 +45,10 @@ public:
         return fd_;
     }
 
+    header::HeaderSection* headerSection() {
+        return &hdr_section_;
+    }
+
     const libvdk::guid::GUID& dataWriteGuid() {
         //return hdr_section_.header(hdr_section_.getCurrentHeaderIndex()).data_write_guid;
         return hdr_section_.activeHeaderDataWriteGuid();
@@ -133,10 +137,18 @@ public:
         mtd_section_.show();
     }
 
+    void showLogEntries() {
+        log_section_.show();
+    }
+
     void showParentInfo();
 
     int buildParentList();
     bool isParentAlreadyAllocBlock(uint32_t bat_index);
+
+    /* Per the spec, on the first write of guest-visible data to the file the
+     * data write guid must be updated in the header */
+    int userVisibleWrite(); 
 
     static const char* payloadStatusToString(vhdx::bat::PayloadBatEntryStatus status);
     static const char* bitmapStatusToString(vhdx::bat::BitmapBatEntryStatus status);
@@ -167,19 +179,22 @@ private:
     int  allocateBlock(bool parent_already_alloc_block, uint64_t* new_offset, uint64_t* bitmap_offset, bool* need_zero);
     void updateBatTablePayloadEntry(const detail::SectorInfo& si, vhdx::bat::PayloadBatEntryStatus status, 
             vhdx::bat::BatEntry* bat_entry, uint64_t* bat_entry_offset);
-    void updateBatTableBitmapEntry(const detail::SectorInfo& si, vhdx::bat::BitmapBatEntryStatus status);
-
-    /* Per the spec, on the first write of guest-visible data to the file the
-     * data write guid must be updated in the header */
-    int userVisibleWrite(); 
+    void updateBatTableBitmapEntry(const detail::SectorInfo& si, vhdx::bat::BitmapBatEntryStatus status,
+            vhdx::bat::BatEntry* bat_entry, uint64_t* bat_entry_offset);
 
     int writeBitmap(uint64_t bitmap_offset, uint64_t sector_num, uint32_t nb_sectors);
     int loadBlockBitmap(uint64_t bitmap_offset, std::vector<uint8_t>* bitmap_buf);
     int saveBlockBitmap(uint64_t bitmap_offset, const std::vector<uint8_t>& bitmap_buf);
+    int loadPartiallyBlockBitmap(uint64_t sector_num, uint32_t nb_sectors, 
+            uint64_t *bitmap_offset, uint32_t *secs, std::vector<uint8_t>* bitmap_buf);
+    int modifyPartiallyBitmap(uint64_t *bitmap_offset, uint64_t sector_num, uint32_t nb_sectors, 
+            std::vector<uint8_t>* partially_bitmap_buf);
 
     int writeBatTableEntry(uint32_t bat_index);
 
     int readRecursion(int vhdx_index, uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf);
+    int readFromParents(int parents_index, uint64_t sector_num, uint32_t nb_sectors, uint8_t* buf);
+    int readFromCurrent(uint64_t offset, uint8_t* buf, uint32_t len);
 
     header::HeaderSection hdr_section_;
     log::LogSection log_section_;

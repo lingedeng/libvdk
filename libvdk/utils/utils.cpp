@@ -66,6 +66,15 @@ namespace file {
         return (errno ? -errno : -EIO);
     }
 
+    int seek_and_read_file(int fd, off64_t offset, void* buf, size_t size, int whence) {
+        int ret = seek_file(fd, offset, whence);
+        if (ret) {
+            return ret;
+        }
+
+        return read_file(fd, buf, size);
+    }    
+
     int write_file(int fd, const void* buf, size_t size) {
         size_t ret;
 
@@ -84,6 +93,15 @@ namespace file {
             fd, size, ret, -errno);
 
         return (errno ? -errno : -EIO);
+    }
+
+    int seek_and_write_file(int fd, off64_t offset, const void* buf, size_t size, int whence) {
+        int ret = seek_file(fd, offset, whence);
+        if (ret) {
+            return ret;
+        }
+
+        return write_file(fd, buf, size);
     }
 
     // int get_file_sizes_li(int fd, LARGE_INTEGER* pos) {
